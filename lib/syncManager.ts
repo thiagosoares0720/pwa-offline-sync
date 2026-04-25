@@ -20,74 +20,105 @@ export class SyncManager {
     this.syncErrors = [];
     
     try {
-      // First, check if Supabase connection works
       const isConnected = await this.checkConnection();
       if (!isConnected) {
         throw new Error('Cannot connect to Supabase');
       }
 
-      // Get pending tasks from IndexedDB
+      // Sincronizar tarefas normais pendentes
       const pendingTasks = await db.getPendingTasks();
       
-      if (pendingTasks.length === 0) {
+      // Sincronizar tarefas deletadas
+      const deletedTasks = await db.getDeletedTasks();
+      
+      const allPendingTasks = [...pendingTasks, ...deletedTasks];
+      
+      if (allPendingTasks.length === 0) {
         console.log('No pending tasks to sync');
         return;
       }
 
-      console.log(`Syncing ${pendingTasks.length} tasks...`, pendingTasks);
+      console.log(`Syncing ${allPendingTasks.length} tasks...`, allPendingTasks);
 
-      // Sync each pending task
       let syncedCount = 0;
       let failedCount = 0;
 
-      for (const task of pendingTasks) {
+      for (const task of allPendingTasks) {
         try {
           console.log(`Syncing task:`, task);
           
-          // Prepare data for Supabase
-          const taskData = {
-            title: task.title,
-            description: task.description || '',
-            completed: task.completed,
-            updated_at: new Date().toISOString(),
-          };
+          // Se for uma tarefa deletada
+          if (task.sync_status === 'deleted') {
+            // Deletar do Supabase
+            if (task.offline_id) {
+              const { error } = await supabase
+                .from('tasks')
+                .delete()
+                .eq('id', task.offline_id);
 
-          let result;
-          
-          // Check if task exists by offline_id or id
-          if (task.offline_id) {
-            // Try to update existing task
-            const { data, error } = await supabase
-              .from('tasks')
-              .update(taskData)
-              .eq('id', task.offline_id)
-              .select();
+              if (error) throw error;
+              
+              // Remover completamente do IndexedDB após deletar do servidor
+              if (task.id) {
+                await db.permanentlyDeleteTask(Number(task.id));
+              }
+              
+              syncedCount++;
+              console.log(`Task ${task.id} deleted from server successfully`);
+            }
+          } 
+          // Se for uma tarefa normal (criação/atualização)
+          else {
+            const taskData = {
+              title: task.title,
+              description: task.description || '',
+              completed: task.completed,
+              updated_at: new Date().toISOString(),
+            };
+            
+            let result;
+            
+            if (task.offline_id) {
+              // Atualizar tarefa existente
+              const { data, error } = await supabase
+                .from('tasks')
+                .update(taskData)
+                .eq('id', task.offline_id)
+                .select();
 
-            if (error && error.code !== 'PGRST116') throw error;
-            result = data;
-          } else {
-            // Insert new task
-            const { data, error } = await supabase
-              .from('tasks')
-              .insert([{
-                ...taskData,
-                created_at: task.created_at.toISOString(),
-                sync_status: 'synced'
-              }])
-              .select();
+              if (error && error.code !== 'PGRST116') throw error;
+              result = data;
+            } else {
+              // Inserir nova tarefa
+              const { data, error } = await supabase
+                .from('tasks')
+                .insert([{
+                  ...taskData,
+                  created_at: task.created_at.toISOString(),
+                  sync_status: 'synced'
+                }])
+                .select();
 
-            if (error) throw error;
-            result = data;
-          }
+              if (error) throw error;
+              result = data;
+              
+              // Salvar o ID do servidor no offline_id
+              if (result && result[0] && task.id) {
+                await db.updateTask(Number(task.id), { 
+                  offline_id: result[0].id,
+                  sync_status: 'synced'
+                });
+              }
+            }
 
-          // Update local task as synced
-          if (task.id) {
-            await db.updateTask(Number(task.id), { 
-              sync_status: 'synced',
-              updated_at: new Date()
-            });
-            syncedCount++;
-            console.log(`Task ${task.id} synced successfully`);
+            if (task.id && task.sync_status !== 'deleted') {
+              await db.updateTask(Number(task.id), { 
+                sync_status: 'synced',
+                updated_at: new Date()
+              });
+              syncedCount++;
+              console.log(`Task ${task.id} synced successfully`);
+            }
           }
           
         } catch (error: any) {
@@ -95,7 +126,7 @@ export class SyncManager {
           failedCount++;
           this.syncErrors.push(`Task ${task.title}: ${error.message}`);
           
-          if (task.id) {
+          if (task.id && task.sync_status !== 'deleted') {
             await db.updateTask(Number(task.id), { 
               sync_status: 'failed',
               updated_at: new Date()
@@ -106,7 +137,6 @@ export class SyncManager {
 
       console.log(`Sync completed: ${syncedCount} synced, ${failedCount} failed`);
       
-      // Show user feedback if there were errors
       if (failedCount > 0) {
         this.showSyncNotification(`Sync completed with ${failedCount} errors. Check console for details.`);
       } else if (syncedCount > 0) {
@@ -123,12 +153,10 @@ export class SyncManager {
 
   async checkConnection(): Promise<boolean> {
     try {
-      // Simple health check to Supabase
       const { error } = await supabase
         .from('tasks')
         .select('count', { count: 'exact', head: true });
       
-      // If error is about not finding table, connection is still working
       if (error && error.message.includes('relation')) {
         console.warn('Table may not exist, but connection works');
         return true;
@@ -163,11 +191,9 @@ export class SyncManager {
       if (data && data.length > 0) {
         console.log(`Fetched ${data.length} remote tasks`);
         
-        // Clear existing tasks or merge? Let's merge for now
         const localTasks = await db.getAllTasks();
         
         for (const remoteTask of data) {
-          // Check if task already exists locally
           const exists = localTasks.some(t => t.offline_id === remoteTask.id);
           
           if (!exists) {
@@ -215,28 +241,23 @@ export class SyncManager {
   }
 
   private showSyncNotification(message: string) {
-    // Check if Notification API is available
     if ('Notification' in window && Notification.permission === 'granted') {
       new Notification('Sync Status', { body: message });
     }
     
-    // Also dispatch a custom event for UI to show
     window.dispatchEvent(new CustomEvent('sync-status', { detail: { message } }));
   }
 
   startAutoSync(intervalMinutes: number = 5) {
-    // Request notification permission
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
     }
 
-    // Sync immediately
     setTimeout(() => {
       this.syncTasks();
       this.fetchRemoteTasks();
-    }, 1000); // Delay to ensure DB is ready
+    }, 1000);
 
-    // Set up periodic sync
     const interval = setInterval(() => {
       if (navigator.onLine) {
         console.log('Running periodic sync...');
@@ -245,7 +266,6 @@ export class SyncManager {
       }
     }, intervalMinutes * 60 * 1000);
 
-    // Listen for online/offline events
     window.addEventListener('online', () => {
       console.log('Back online - syncing...');
       this.syncTasks();

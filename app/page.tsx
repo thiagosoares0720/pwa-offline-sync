@@ -4,7 +4,8 @@ import { useTasks } from '@/hooks/useTasks';
 import TaskForm from '@/components/TaskForm';
 import TaskList from '@/components/TaskList';
 import NetworkStatus from '@/components/NetworkStatus';
-import SyncStatus from '@/components/SyncStatus'; // Add this import
+import SyncStatus from '@/components/SyncStatus';
+import PWAPrompt from '@/components/PWAPrompt'; // Adicionar
 
 export default function Home() {
   const {
@@ -30,7 +31,8 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gray-50">
       <NetworkStatus isOnline={isOnline} />
-      <SyncStatus /> {/* Add this component */}
+      <SyncStatus />
+      <PWAPrompt /> {/* Adicionar */}
       
       <div className="max-w-2xl mx-auto px-4 py-8">
         <header className="text-center mb-8">

@@ -8,10 +8,8 @@ export function useTasks() {
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   useEffect(() => {
-    // Load tasks from IndexedDB
     loadTasks();
 
-    // Set up online/offline listeners
     const handleOnline = () => {
       setIsOnline(true);
       syncManager.syncTasks();
@@ -23,7 +21,6 @@ export function useTasks() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Start auto-sync
     const cleanup = syncManager.startAutoSync(2);
 
     return () => {
@@ -55,7 +52,6 @@ export function useTasks() {
     await db.addTask(newTask);
     await loadTasks();
     
-    // Try to sync immediately if online
     if (isOnline) {
       await syncManager.syncTasks();
       await loadTasks();
@@ -82,11 +78,14 @@ export function useTasks() {
   const deleteTask = async (task: Task) => {
     if (!task.id) return;
     
+    // Marcar como deletado em vez de remover imediatamente
     await db.deleteTask(Number(task.id));
     await loadTasks();
     
+    // Se estiver online, tenta sincronizar a exclusão imediatamente
     if (isOnline) {
       await syncManager.syncTasks();
+      await loadTasks();
     }
   };
 
